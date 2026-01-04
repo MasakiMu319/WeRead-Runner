@@ -30,6 +30,38 @@ PROGRESS_INTERVAL_READS = int(PROGRESS_INTERVAL_MIN / READ_MIN_PER_SUCCESS)
 VALID_PUSH_METHODS = {"pushplus", "telegram", "wxpusher", "serverchan"}
 
 
+def encode_weread_id(value):
+    """微信读书的 ID 编码（来自前端逻辑）"""
+    if isinstance(value, int):
+        value = str(value)
+    if not isinstance(value, str):
+        return value
+    md5_hex = hashlib.md5(value.encode()).hexdigest()
+    prefix = md5_hex[:3]
+    if value.isdigit():
+        pieces = []
+        for i in range(0, len(value), 9):
+            chunk = value[i : i + 9]
+            pieces.append(format(int(chunk), "x"))
+        flag = "3"
+    else:
+        pieces = ["".join(format(ord(ch), "x") for ch in value)]
+        flag = "4"
+    out = prefix + flag
+    out += "2" + md5_hex[-2:]
+    for idx, item in enumerate(pieces):
+        length_hex = format(len(item), "x")
+        if len(length_hex) == 1:
+            length_hex = "0" + length_hex
+        out += length_hex + item
+        if idx < len(pieces) - 1:
+            out += "g"
+    if len(out) < 0x14:
+        out += md5_hex[: 0x14 - len(out)]
+    out += hashlib.md5(out.encode()).hexdigest()[:3]
+    return out
+
+
 def encode_data(data):
     """数据编码"""
     return "&".join(
@@ -167,36 +199,38 @@ def find_key_recursive(obj, target_key):
     return None
 
 
-def find_mapping_recursive(obj, candidate_keys):
-    if isinstance(obj, dict):
-        for key in candidate_keys:
-            if key in obj and isinstance(obj[key], dict):
-                return obj[key]
-        for value in obj.values():
-            found = find_mapping_recursive(value, candidate_keys)
-            if found is not None:
-                return found
-    elif isinstance(obj, list):
-        for item in obj:
-            found = find_mapping_recursive(item, candidate_keys)
-            if found is not None:
-                return found
+def extract_initial_state(html):
+    for marker in (
+        "window.__INITIAL_STATE__",
+        "__INITIAL_STATE__",
+        "window.__NUXT__",
+        "__NUXT__",
+    ):
+        state_obj = extract_json_after_marker(html, marker)
+        if state_obj:
+            return state_obj
     return None
 
 
-def normalize_uid_map(uid_map):
-    if not isinstance(uid_map, dict):
-        return None
-    normalized = {}
-    for key, value in uid_map.items():
-        if key is None or value is None:
-            continue
-        normalized[str(key)] = str(value)
-    return normalized or None
+def collect_readers(state_obj):
+    readers = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if "reader" in obj and isinstance(obj["reader"], dict):
+                readers.append(obj["reader"])
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(state_obj)
+    return readers
 
 
 def get_reader_info(read_book_id):
-    """解析 reader 页面，获取 progress 的 bookId 与 chapterUid->chapterId 映射"""
+    """解析 reader 页面，获取 progress 的 bookId"""
     if not read_book_id:
         logging.error("❌ 未指定 reader bookId。")
         return None
@@ -210,49 +244,35 @@ def get_reader_info(read_book_id):
     if resp_cookie_dict:
         cookies.update(resp_cookie_dict)
     html = response.text or ""
-    reader_obj = extract_json_after_key(html, '"reader"')
+    reader_obj = None
+    state_obj = extract_initial_state(html)
+    if state_obj:
+        readers = collect_readers(state_obj)
+        for item in readers:
+            if (
+                isinstance(item, dict)
+                and item.get("chapterInfos")
+                and (item.get("bookId") or item.get("book", {}).get("bookId"))
+            ):
+                reader_obj = item
+                break
+        if not reader_obj and readers:
+            reader_obj = readers[0]
     if not reader_obj:
-        for marker in (
-            "window.__INITIAL_STATE__",
-            "__INITIAL_STATE__",
-            "window.__NUXT__",
-            "__NUXT__",
-        ):
-            state_obj = extract_json_after_marker(html, marker)
-            if state_obj:
-                reader_obj = find_key_recursive(state_obj, "reader")
-                if reader_obj:
-                    break
+        reader_obj = extract_json_after_key(html, '"reader"')
     progress_book_id = None
     if isinstance(reader_obj, dict):
-        progress_book_id = reader_obj.get("bookId") or reader_obj.get("book", {}).get("bookId")
+        progress_book_id = reader_obj.get("bookId") or reader_obj.get("book", {}).get(
+            "bookId"
+        )
     if not progress_book_id:
         match = re.search(r'"bookId"\s*:\s*"(\d+)"', html)
         if match:
             progress_book_id = match.group(1)
-    candidate_keys = (
-        "chapterUidToId",
-        "chapterUidToIdMap",
-        "chapterUidMap",
-        "chapterIdMap",
-    )
-    uid_map = None
-    if reader_obj:
-        uid_map = find_mapping_recursive(reader_obj, candidate_keys)
-    if not uid_map:
-        for key in candidate_keys:
-            uid_map = extract_json_after_key(html, f'"{key}"')
-            if isinstance(uid_map, dict):
-                break
-            uid_map = None
-    uid_map = normalize_uid_map(uid_map)
     if not progress_book_id:
         logging.error("❌ reader 页面未解析到 progress bookId。")
         return None
-    if not uid_map:
-        logging.error("❌ reader 页面未解析到 chapterUid 映射。")
-        return None
-    return {"progress_book_id": str(progress_book_id), "uid_map": uid_map}
+    return {"progress_book_id": str(progress_book_id)}
 
 
 def get_progress(book_id):
@@ -349,22 +369,15 @@ def advance_chapter_pos(current_pos, readable_positions):
     return readable_positions[0]
 
 
-def build_readable_positions(chapters, uid_map):
+def build_readable_positions(chapters):
     """筛选可阅读章节索引"""
     readable = []
     for i, ch in enumerate(chapters):
-        uid = ch.get("uid")
-        if uid_map and str(uid) not in uid_map:
-            continue
         if ch.get("word_count", 0) > 50:
             readable.append(i)
     if readable:
         return readable
-    return [
-        i
-        for i, ch in enumerate(chapters)
-        if not uid_map or str(ch.get("uid")) in uid_map
-    ]
+    return [i for i, ch in enumerate(chapters)]
 
 
 def pick_random_chapter(chapters, readable_positions):
@@ -448,7 +461,6 @@ stopped_reason = None
 target_minutes = READ_NUM * READ_MIN_PER_SUCCESS
 read_book_id = random.choice(book) if book else data.get("b")
 progress_book_id = None
-chapter_uid_map = None
 progress = None
 app_id = data.get("appId")
 current_idx = data.get("ci") or 1
@@ -468,13 +480,14 @@ else:
         stopped_reason = "读取 reader 信息失败。"
     else:
         progress_book_id = reader_info["progress_book_id"]
-        chapter_uid_map = reader_info["uid_map"]
         progress = get_progress(progress_book_id)
     if not stopped_reason and not progress:
         stopped_reason = "获取阅读进度失败。"
     elif not stopped_reason:
         progress_book = progress.get("book") or {}
         app_id = progress_book.get("appId") or app_id
+        if progress_book_id:
+            read_book_id = encode_weread_id(progress_book_id)
         progress_idx = progress_book.get("chapterIdx")
         if progress_idx is not None:
             current_idx = progress_idx
@@ -494,9 +507,9 @@ else:
         if not chapters:
             stopped_reason = "获取章节信息失败。"
         else:
-            readable_positions = build_readable_positions(chapters, chapter_uid_map)
+            readable_positions = build_readable_positions(chapters)
             if not readable_positions:
-                stopped_reason = "无可读章节映射，无法继续。"
+                stopped_reason = "无可读章节，无法继续。"
                 readable_positions = None
             else:
                 last_readable_pos = readable_positions[-1]
@@ -516,6 +529,9 @@ else:
                 if current_word_count <= 50:
                     chapter_pos = advance_chapter_pos(chapter_pos, readable_positions)
                     current_idx = chapters[chapter_pos]["idx"]
+                chapter_title = chapters[chapter_pos].get("title")
+                if chapter_title:
+                    current_summary = chapter_title
                 logging.info(
                     "📚 书籍=%s 章节数=%s 起始章节=%s",
                     read_book_id,
@@ -535,11 +551,10 @@ if not stopped_reason:
         current_idx = current_chapter["idx"]
         current_uid = current_chapter.get("uid")
         current_word_count = current_chapter.get("word_count", 0)
-        chapter_id = None
-        if current_uid is not None and chapter_uid_map:
-            chapter_id = chapter_uid_map.get(str(current_uid))
-        if not chapter_id and chapter_uid_map:
-            chapter_id = chapter_uid_map.get(str(current_idx))
+        chapter_title = current_chapter.get("title")
+        if chapter_title:
+            current_summary = chapter_title
+        chapter_id = encode_weread_id(current_uid) if current_uid is not None else None
         if not chapter_id:
             stopped_reason = f"无法匹配章节ID(chapterUid={current_uid})，已停止。"
             break

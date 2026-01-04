@@ -45,20 +45,8 @@ headers = {
 
 
 # 书籍
-book = [
-    "36d322f07186022636daa5e",
-    "6f932ec05dd9eb6f96f14b9",
-    "43f3229071984b9343f04a4",
-    "d7732ea0813ab7d58g0184b8",
-    "3d03298058a9443d052d409",
-    "4fc328a0729350754fc56d4",
-    "a743220058a92aa746632c0",
-    "140329d0716ce81f140468e",
-    "1d9321c0718ff5e11d9afe8",
-    "ff132750727dc0f6ff1f7b5",
-    "e8532a40719c4eb7e851cbe",
-    "9b13257072562b5c9b1c8d6",
-]
+book = ["24a320007191987a24a4603"]
+
 
 # 章节/书籍列表支持环境变量覆盖（逗号分隔）
 def _parse_env_list(value):
@@ -66,6 +54,7 @@ def _parse_env_list(value):
         return None
     items = [v.strip() for v in value.split(",") if v.strip()]
     return items or None
+
 
 _book_env = _parse_env_list(os.getenv("WXREAD_BOOK_LIST"))
 if _book_env:

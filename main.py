@@ -25,6 +25,13 @@ READER_URL = "https://weread.qq.com/web/reader"
 RENEW_URL = "https://weread.qq.com/web/login/renewal"
 FIX_SYNCKEY_URL = "https://weread.qq.com/web/book/chapterInfos"
 READ_MIN_PER_SUCCESS = 0.5
+RT_SECONDS = 30
+SLEEP_MIN_SECONDS = RT_SECONDS + 1
+SLEEP_MAX_SECONDS = RT_SECONDS + 15
+SESSION_MINUTES_MIN = 20
+SESSION_MINUTES_MAX = 40
+REST_MINUTES_MIN = 3
+REST_MINUTES_MAX = 8
 PROGRESS_INTERVAL_MIN = 10
 PROGRESS_INTERVAL_READS = int(PROGRESS_INTERVAL_MIN / READ_MIN_PER_SUCCESS)
 VALID_PUSH_METHODS = {"pushplus", "telegram", "wxpusher", "serverchan"}
@@ -483,7 +490,9 @@ book_meta = {}
 chapter_pos = 0
 readable_positions = None
 last_readable_pos = 0
-lastTime = int(time.time()) - 30
+session_minutes = 0.0
+session_target_minutes = random.randint(SESSION_MINUTES_MIN, SESSION_MINUTES_MAX)
+last_progress_push_ts = None
 logging.info(f"⏱️ 一共需要阅读 {READ_NUM} 次...")
 if not read_book_id:
     stopped_reason = "未找到可用的 bookId。"
@@ -600,7 +609,7 @@ if not stopped_reason:
 
         thisTime = int(time.time())
         data["ct"] = thisTime
-        data["rt"] = thisTime - lastTime
+        data["rt"] = RT_SECONDS
         data["ts"] = int(thisTime * 1000) + random.randint(0, 1000)
         data["rn"] = random.randint(0, 1000)
         data["sg"] = hashlib.sha256(f"{data['ts']}{data['rn']}{KEY}".encode()).hexdigest()
@@ -623,7 +632,6 @@ if not stopped_reason:
         if "succ" in resData:
             if "synckey" in resData:
                 interval = data["rt"]
-                lastTime = thisTime
                 success_count += 1
                 index += 1
 
@@ -660,15 +668,56 @@ if not stopped_reason:
                         if next_chapter.get("title"):
                             current_summary = next_chapter["title"]
 
-                time.sleep(random.randint(25, 45))
-                done_minutes = success_count * READ_MIN_PER_SUCCESS
-                logging.info(f"✅ 阅读成功，阅读进度：{format_minutes(done_minutes)} 分钟")
-                if success_count % PROGRESS_INTERVAL_READS == 0:
+                session_minutes += READ_MIN_PER_SUCCESS
+                if session_minutes >= session_target_minutes:
+                    rest_minutes = random.randint(REST_MINUTES_MIN, REST_MINUTES_MAX)
+                    logging.info(
+                        "😴 连续阅读 %s 分钟，休息 %s 分钟",
+                        format_minutes(session_minutes),
+                        rest_minutes,
+                    )
                     safe_push(
-                        f"📈 阅读进度：{format_minutes(done_minutes)} 分钟 / "
-                        f"{format_minutes(target_minutes)} 分钟",
+                        "😴 进入休息\n"
+                        f"已连续阅读：{format_minutes(session_minutes)} 分钟\n"
+                        f"预计休息：{rest_minutes} 分钟",
                         PUSH_METHOD,
                     )
+                    time.sleep(rest_minutes * 60)
+                    session_minutes = 0.0
+                    session_target_minutes = random.randint(
+                        SESSION_MINUTES_MIN, SESSION_MINUTES_MAX
+                    )
+                    safe_push(
+                        "✅ 休息结束，继续阅读\n"
+                        f"下一轮目标：{session_target_minutes} 分钟",
+                        PUSH_METHOD,
+                    )
+                time.sleep(random.randint(SLEEP_MIN_SECONDS, SLEEP_MAX_SECONDS))
+                done_minutes = success_count * READ_MIN_PER_SUCCESS
+                if last_progress_push_ts is None:
+                    gap_label = "未上报"
+                else:
+                    gap_seconds = int(time.time() - last_progress_push_ts)
+                    gap_label = f"{gap_seconds // 60}分{gap_seconds % 60}秒"
+                logging.info(
+                    "✅ 阅读成功，阅读进度：%s 分钟（距上次上报：%s）",
+                    format_minutes(done_minutes),
+                    gap_label,
+                )
+                if success_count % PROGRESS_INTERVAL_READS == 0:
+                    now_ts = int(time.time())
+                    if last_progress_push_ts is None:
+                        gap_text = "首次上报"
+                    else:
+                        gap_seconds = now_ts - last_progress_push_ts
+                        gap_text = f"{gap_seconds // 60}分{gap_seconds % 60}秒"
+                    safe_push(
+                        f"📈 阅读进度：{format_minutes(done_minutes)} 分钟 / "
+                        f"{format_minutes(target_minutes)} 分钟\n"
+                        f"⏱️ 距上次上报：{gap_text}",
+                        PUSH_METHOD,
+                    )
+                    last_progress_push_ts = now_ts
             else:
                 logging.warning("❌ 无synckey, 尝试修复...")
                 fix_no_synckey(progress_book_id)

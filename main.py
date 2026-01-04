@@ -1,6 +1,7 @@
 # main.py 主逻辑：包括字段拼接、模拟请求
 import re
 import os
+import math
 import json
 import time
 import random
@@ -513,7 +514,10 @@ refresh_cookie()
 index = 1
 success_count = 0
 stopped_reason = None
-target_minutes = READ_NUM * READ_MIN_PER_SUCCESS
+min_reads = max(READ_NUM, math.ceil(180 / READ_MIN_PER_SUCCESS))
+max_reads = int(min_reads * 1.5)
+target_reads = random.randint(min_reads, max_reads)
+target_minutes = target_reads * READ_MIN_PER_SUCCESS
 read_book_id = random.choice(book) if book else data.get("b")
 progress_book_id = None
 progress = None
@@ -530,7 +534,11 @@ session_minutes = 0.0
 session_target_minutes = random.randint(SESSION_MINUTES_MIN, SESSION_MINUTES_MAX)
 last_progress_push_ts = None
 last_report_mono = None
-logging.info(f"⏱️ 一共需要阅读 {READ_NUM} 次...")
+logging.info(
+    "⏱️ 一共需要阅读 %s 次（下限=%s次）...",
+    target_reads,
+    READ_NUM,
+)
 if not read_book_id:
     stopped_reason = "未找到可用的 bookId。"
 else:
@@ -612,7 +620,7 @@ if not stopped_reason:
         book_line = None
     start_lines = [
         "🚀 开始自动阅读",
-        f"🎯 目标次数：{READ_NUM} 次",
+        f"🎯 目标次数：{target_reads} 次",
         f"⏱️ 目标时长：{format_minutes(target_minutes)} 分钟",
     ]
     if book_line:
@@ -622,7 +630,7 @@ if not stopped_reason:
         PUSH_METHOD,
     )
 
-    while index <= READ_NUM:
+    while index <= target_reads:
         data.pop("s", None)
         current_chapter = chapters[chapter_pos]
         current_idx = current_chapter["idx"]

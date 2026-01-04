@@ -1,5 +1,6 @@
 # main.py 主逻辑：包括字段拼接、模拟请求
 import re
+import os
 import json
 import time
 import random
@@ -114,7 +115,32 @@ def safe_push(content, method):
     """安全推送：避免因推送配置错误导致主流程崩溃"""
     if method in (None, ""):
         logging.info("ℹ️ PUSH_METHOD 为空，跳过推送。")
-        return False
+    return False
+
+
+def get_start_delay_seconds():
+    """根据环境变量获取启动延迟（秒）"""
+    min_raw = os.getenv("WXREAD_START_DELAY_MIN")
+    max_raw = os.getenv("WXREAD_START_DELAY_MAX")
+    if not min_raw and not max_raw:
+        return 0
+    try:
+        min_val = int(min_raw) if min_raw is not None else 0
+    except ValueError:
+        min_val = 0
+    try:
+        max_val = int(max_raw) if max_raw is not None else 0
+    except ValueError:
+        max_val = 0
+    if min_val < 0:
+        min_val = 0
+    if max_val < 0:
+        max_val = 0
+    if max_val < min_val:
+        min_val, max_val = max_val, min_val
+    if max_val == 0 and min_val == 0:
+        return 0
+    return random.randint(min_val, max_val)
     method_norm = method.lower() if isinstance(method, str) else method
     if method_norm not in VALID_PUSH_METHODS:
         logging.warning("⚠️ PUSH_METHOD 无效(%s)，跳过推送。", method)
@@ -473,6 +499,16 @@ def refresh_cookie():
         return False
 
 
+start_delay_seconds = get_start_delay_seconds()
+if start_delay_seconds > 0:
+    logging.info("⏳ 延迟启动：%s 秒", start_delay_seconds)
+    safe_push(
+        f"⏳ 任务延迟启动\n"
+        f"预计延迟：{start_delay_seconds // 60}分{start_delay_seconds % 60}秒",
+        PUSH_METHOD,
+    )
+    time.sleep(start_delay_seconds)
+
 refresh_cookie()
 index = 1
 success_count = 0
@@ -493,6 +529,7 @@ last_readable_pos = 0
 session_minutes = 0.0
 session_target_minutes = random.randint(SESSION_MINUTES_MIN, SESSION_MINUTES_MAX)
 last_progress_push_ts = None
+last_report_mono = None
 logging.info(f"⏱️ 一共需要阅读 {READ_NUM} 次...")
 if not read_book_id:
     stopped_reason = "未找到可用的 bookId。"
@@ -694,15 +731,17 @@ if not stopped_reason:
                     )
                 time.sleep(random.randint(SLEEP_MIN_SECONDS, SLEEP_MAX_SECONDS))
                 done_minutes = success_count * READ_MIN_PER_SUCCESS
-                if last_progress_push_ts is None:
-                    gap_label = "未上报"
+                now_mono = time.monotonic()
+                if last_report_mono is None:
+                    report_gap = "首次上报"
                 else:
-                    gap_seconds = int(time.time() - last_progress_push_ts)
-                    gap_label = f"{gap_seconds // 60}分{gap_seconds % 60}秒"
+                    gap_seconds = int(now_mono - last_report_mono)
+                    report_gap = f"{gap_seconds}秒"
+                last_report_mono = now_mono
                 logging.info(
                     "✅ 阅读成功，阅读进度：%s 分钟（距上次上报：%s）",
                     format_minutes(done_minutes),
-                    gap_label,
+                    report_gap,
                 )
                 if success_count % PROGRESS_INTERVAL_READS == 0:
                     now_ts = int(time.time())

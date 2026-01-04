@@ -245,6 +245,7 @@ def get_reader_info(read_book_id):
         cookies.update(resp_cookie_dict)
     html = response.text or ""
     reader_obj = None
+    readers = []
     state_obj = extract_initial_state(html)
     if state_obj:
         readers = collect_readers(state_obj)
@@ -271,6 +272,16 @@ def get_reader_info(read_book_id):
             progress_book_id = match.group(1)
     if not progress_book_id:
         logging.error("❌ reader 页面未解析到 progress bookId。")
+        book_id_candidates = re.findall(r'"bookId"\s*:\s*"(\d+)"', html)[:5]
+        logging.error(
+            "🔎 reader 调试: url=%s status=%s len=%s has_state=%s readers=%s bookId候选=%s",
+            url,
+            response.status_code,
+            len(html),
+            True if state_obj else False,
+            len(readers),
+            book_id_candidates if book_id_candidates else None,
+        )
         return None
     return {"progress_book_id": str(progress_book_id)}
 
@@ -326,6 +337,7 @@ def get_chapter_infos(book_id):
     target = next(
         (item for item in items if str(item.get("bookId")) == str(book_id)), items[0]
     )
+    book_meta = target.get("book") or {}
     updated = target.get("updated") or []
     chapters = []
     for item in updated:
@@ -345,7 +357,7 @@ def get_chapter_infos(book_id):
     if not chapters:
         logging.error("❌ 章节信息解析为空。")
         return None
-    return chapters
+    return chapters, book_meta
 
 
 def calc_read_step(interval_sec, word_count):
@@ -467,6 +479,7 @@ current_idx = data.get("ci") or 1
 current_offset = data.get("co") or 0
 current_summary = data.get("sm") or ""
 chapters = None
+book_meta = {}
 chapter_pos = 0
 readable_positions = None
 last_readable_pos = 0
@@ -503,10 +516,11 @@ else:
             current_offset = int(current_offset)
         except (TypeError, ValueError):
             current_offset = 0
-        chapters = get_chapter_infos(progress_book_id)
-        if not chapters:
+        chapters_result = get_chapter_infos(progress_book_id)
+        if not chapters_result:
             stopped_reason = "获取章节信息失败。"
         else:
+            chapters, book_meta = chapters_result
             readable_positions = build_readable_positions(chapters)
             if not readable_positions:
                 stopped_reason = "无可读章节，无法继续。"
@@ -540,8 +554,25 @@ else:
                 )
 
 if not stopped_reason:
+    book_title = book_meta.get("title") if isinstance(book_meta, dict) else None
+    book_author = book_meta.get("author") if isinstance(book_meta, dict) else None
+    if book_title and book_author:
+        book_line = f"📚 书籍：{book_title} - {book_author}"
+    elif book_title:
+        book_line = f"📚 书籍：{book_title}"
+    elif progress_book_id:
+        book_line = f"📚 书籍ID：{progress_book_id}"
+    else:
+        book_line = None
+    start_lines = [
+        "🚀 开始自动阅读",
+        f"🎯 目标次数：{READ_NUM} 次",
+        f"⏱️ 目标时长：{format_minutes(target_minutes)} 分钟",
+    ]
+    if book_line:
+        start_lines.insert(1, book_line)
     safe_push(
-        f"🚀 开始自动阅读\n🎯 目标次数：{READ_NUM} 次\n⏱️ 目标时长：{format_minutes(target_minutes)} 分钟",
+        "\n".join(start_lines),
         PUSH_METHOD,
     )
 

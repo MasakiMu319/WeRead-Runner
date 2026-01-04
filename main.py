@@ -21,6 +21,7 @@ KEY = "3c5c8717f3daf09iop3423zafeqoi"
 COOKIE_DATA = {"rq": "%2Fweb%2Fbook%2FgetProgress", "ql": False}
 READ_URL = "https://weread.qq.com/web/book/read"
 PROGRESS_URL = "https://weread.qq.com/web/book/getProgress"
+READER_URL = "https://weread.qq.com/web/reader"
 RENEW_URL = "https://weread.qq.com/web/login/renewal"
 FIX_SYNCKEY_URL = "https://weread.qq.com/web/book/chapterInfos"
 READ_MIN_PER_SUCCESS = 0.5
@@ -85,6 +86,173 @@ def safe_push(content, method):
     except Exception as exc:
         logging.error("❌ 推送失败: %s", exc)
         return False
+
+
+def extract_balanced_json(text, start_index):
+    """提取从指定位置开始的 JSON 对象字符串"""
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start_index, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start_index : i + 1]
+    return None
+
+
+def extract_json_after_marker(text, marker):
+    """从类似 window.__INITIAL_STATE__=... 中提取 JSON 对象"""
+    idx = text.find(marker)
+    if idx == -1:
+        return None
+    brace_start = text.find("{", idx)
+    if brace_start == -1:
+        return None
+    blob = extract_balanced_json(text, brace_start)
+    if not blob:
+        return None
+    try:
+        return json.loads(blob)
+    except ValueError:
+        return None
+
+
+def extract_json_after_key(text, key):
+    """从 key: { ... } 中提取 JSON 对象"""
+    idx = text.find(key)
+    if idx == -1:
+        return None
+    colon = text.find(":", idx)
+    if colon == -1:
+        return None
+    brace_start = text.find("{", colon)
+    if brace_start == -1:
+        return None
+    blob = extract_balanced_json(text, brace_start)
+    if not blob:
+        return None
+    try:
+        return json.loads(blob)
+    except ValueError:
+        return None
+
+
+def find_key_recursive(obj, target_key):
+    if isinstance(obj, dict):
+        if target_key in obj:
+            return obj[target_key]
+        for value in obj.values():
+            found = find_key_recursive(value, target_key)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_key_recursive(item, target_key)
+            if found is not None:
+                return found
+    return None
+
+
+def find_mapping_recursive(obj, candidate_keys):
+    if isinstance(obj, dict):
+        for key in candidate_keys:
+            if key in obj and isinstance(obj[key], dict):
+                return obj[key]
+        for value in obj.values():
+            found = find_mapping_recursive(value, candidate_keys)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_mapping_recursive(item, candidate_keys)
+            if found is not None:
+                return found
+    return None
+
+
+def normalize_uid_map(uid_map):
+    if not isinstance(uid_map, dict):
+        return None
+    normalized = {}
+    for key, value in uid_map.items():
+        if key is None or value is None:
+            continue
+        normalized[str(key)] = str(value)
+    return normalized or None
+
+
+def get_reader_info(read_book_id):
+    """解析 reader 页面，获取 progress 的 bookId 与 chapterUid->chapterId 映射"""
+    if not read_book_id:
+        logging.error("❌ 未指定 reader bookId。")
+        return None
+    url = f"{READER_URL}/{read_book_id}"
+    try:
+        response = requests.get(url, headers=headers, cookies=cookies)
+    except Exception as exc:
+        logging.error("❌ 获取 reader 页面失败: %s", exc)
+        return None
+    resp_cookie_dict = response.cookies.get_dict()
+    if resp_cookie_dict:
+        cookies.update(resp_cookie_dict)
+    html = response.text or ""
+    reader_obj = extract_json_after_key(html, '"reader"')
+    if not reader_obj:
+        for marker in (
+            "window.__INITIAL_STATE__",
+            "__INITIAL_STATE__",
+            "window.__NUXT__",
+            "__NUXT__",
+        ):
+            state_obj = extract_json_after_marker(html, marker)
+            if state_obj:
+                reader_obj = find_key_recursive(state_obj, "reader")
+                if reader_obj:
+                    break
+    progress_book_id = None
+    if isinstance(reader_obj, dict):
+        progress_book_id = reader_obj.get("bookId") or reader_obj.get("book", {}).get("bookId")
+    if not progress_book_id:
+        match = re.search(r'"bookId"\s*:\s*"(\d+)"', html)
+        if match:
+            progress_book_id = match.group(1)
+    candidate_keys = (
+        "chapterUidToId",
+        "chapterUidToIdMap",
+        "chapterUidMap",
+        "chapterIdMap",
+    )
+    uid_map = None
+    if reader_obj:
+        uid_map = find_mapping_recursive(reader_obj, candidate_keys)
+    if not uid_map:
+        for key in candidate_keys:
+            uid_map = extract_json_after_key(html, f'"{key}"')
+            if isinstance(uid_map, dict):
+                break
+            uid_map = None
+    uid_map = normalize_uid_map(uid_map)
+    if not progress_book_id:
+        logging.error("❌ reader 页面未解析到 progress bookId。")
+        return None
+    if not uid_map:
+        logging.error("❌ reader 页面未解析到 chapterUid 映射。")
+        return None
+    return {"progress_book_id": str(progress_book_id), "uid_map": uid_map}
 
 
 def get_progress(book_id):
@@ -171,21 +339,32 @@ def calc_read_step(interval_sec, word_count):
     return step
 
 
-def advance_chapter_pos(chapters, current_pos):
-    """推进到下一个较大的章节"""
-    if not chapters:
+def advance_chapter_pos(current_pos, readable_positions):
+    """推进到下一个可读章节"""
+    if not readable_positions:
         return current_pos
-    for _ in range(len(chapters)):
-        current_pos = (current_pos + 1) % len(chapters)
-        if chapters[current_pos].get("word_count", 0) > 50:
-            return current_pos
-    return current_pos
+    for pos in readable_positions:
+        if pos > current_pos:
+            return pos
+    return readable_positions[0]
 
 
-def build_readable_positions(chapters):
+def build_readable_positions(chapters, uid_map):
     """筛选可阅读章节索引"""
-    readable = [i for i, ch in enumerate(chapters) if ch.get("word_count", 0) > 50]
-    return readable if readable else list(range(len(chapters)))
+    readable = []
+    for i, ch in enumerate(chapters):
+        uid = ch.get("uid")
+        if uid_map and str(uid) not in uid_map:
+            continue
+        if ch.get("word_count", 0) > 50:
+            readable.append(i)
+    if readable:
+        return readable
+    return [
+        i
+        for i, ch in enumerate(chapters)
+        if not uid_map or str(ch.get("uid")) in uid_map
+    ]
 
 
 def pick_random_chapter(chapters, readable_positions):
@@ -269,6 +448,8 @@ stopped_reason = None
 target_minutes = READ_NUM * READ_MIN_PER_SUCCESS
 read_book_id = random.choice(book) if book else data.get("b")
 progress_book_id = None
+chapter_uid_map = None
+progress = None
 app_id = data.get("appId")
 current_idx = data.get("ci") or 1
 current_offset = data.get("co") or 0
@@ -277,17 +458,21 @@ chapters = None
 chapter_pos = 0
 readable_positions = None
 last_readable_pos = 0
-chapter_uid_warned = False
 lastTime = int(time.time()) - 30
 logging.info(f"⏱️ 一共需要阅读 {READ_NUM} 次...")
 if not read_book_id:
     stopped_reason = "未找到可用的 bookId。"
 else:
-    progress = get_progress(read_book_id)
-    if not progress:
-        stopped_reason = "获取阅读进度失败。"
+    reader_info = get_reader_info(read_book_id)
+    if not reader_info:
+        stopped_reason = "读取 reader 信息失败。"
     else:
-        progress_book_id = progress.get("bookId") or read_book_id
+        progress_book_id = reader_info["progress_book_id"]
+        chapter_uid_map = reader_info["uid_map"]
+        progress = get_progress(progress_book_id)
+    if not stopped_reason and not progress:
+        stopped_reason = "获取阅读进度失败。"
+    elif not stopped_reason:
         progress_book = progress.get("book") or {}
         app_id = progress_book.get("appId") or app_id
         progress_idx = progress_book.get("chapterIdx")
@@ -309,27 +494,34 @@ else:
         if not chapters:
             stopped_reason = "获取章节信息失败。"
         else:
-            readable_positions = build_readable_positions(chapters)
-            last_readable_pos = readable_positions[-1] if readable_positions else 0
-            chapter_pos = next(
-                (i for i, ch in enumerate(chapters) if ch["idx"] == int(current_idx)),
-                None,
-            )
-            if chapter_pos is None:
-                chapter_pos = readable_positions[0] if readable_positions else 0
-                current_idx = chapters[chapter_pos]["idx"]
-            current_word_count = chapters[chapter_pos].get("word_count", 0)
-            if current_word_count and current_offset >= current_word_count:
-                current_offset = max(0, current_word_count - 1)
-            if current_word_count <= 50:
-                chapter_pos = advance_chapter_pos(chapters, chapter_pos)
-                current_idx = chapters[chapter_pos]["idx"]
-            logging.info(
-                "📚 书籍=%s 章节数=%s 起始章节=%s",
-                read_book_id,
-                len(chapters),
-                current_idx,
-            )
+            readable_positions = build_readable_positions(chapters, chapter_uid_map)
+            if not readable_positions:
+                stopped_reason = "无可读章节映射，无法继续。"
+                readable_positions = None
+            else:
+                last_readable_pos = readable_positions[-1]
+            if stopped_reason:
+                pass
+            else:
+                chapter_pos = next(
+                    (i for i, ch in enumerate(chapters) if ch["idx"] == int(current_idx)),
+                    None,
+                )
+                if chapter_pos is None or chapter_pos not in readable_positions:
+                    chapter_pos = readable_positions[0]
+                    current_idx = chapters[chapter_pos]["idx"]
+                current_word_count = chapters[chapter_pos].get("word_count", 0)
+                if current_word_count and current_offset >= current_word_count:
+                    current_offset = max(0, current_word_count - 1)
+                if current_word_count <= 50:
+                    chapter_pos = advance_chapter_pos(chapter_pos, readable_positions)
+                    current_idx = chapters[chapter_pos]["idx"]
+                logging.info(
+                    "📚 书籍=%s 章节数=%s 起始章节=%s",
+                    read_book_id,
+                    len(chapters),
+                    current_idx,
+                )
 
 if not stopped_reason:
     safe_push(
@@ -343,11 +535,15 @@ if not stopped_reason:
         current_idx = current_chapter["idx"]
         current_uid = current_chapter.get("uid")
         current_word_count = current_chapter.get("word_count", 0)
-        if current_uid is not None:
-            data["c"] = str(current_uid)
-        elif not chapter_uid_warned:
-            logging.warning("⚠️ 章节缺少 chapterUid，沿用原始 c 字段。")
-            chapter_uid_warned = True
+        chapter_id = None
+        if current_uid is not None and chapter_uid_map:
+            chapter_id = chapter_uid_map.get(str(current_uid))
+        if not chapter_id and chapter_uid_map:
+            chapter_id = chapter_uid_map.get(str(current_idx))
+        if not chapter_id:
+            stopped_reason = f"无法匹配章节ID(chapterUid={current_uid})，已停止。"
+            break
+        data["c"] = chapter_id
         data["appId"] = app_id
         data["b"] = read_book_id
         data["ci"] = int(current_idx)
@@ -388,7 +584,7 @@ if not stopped_reason:
                 step = calc_read_step(interval, current_word_count)
                 current_offset += step
                 if current_word_count <= 0:
-                    chapter_pos = advance_chapter_pos(chapters, chapter_pos)
+                    chapter_pos = advance_chapter_pos(chapter_pos, readable_positions)
                     next_chapter = chapters[chapter_pos]
                     current_idx = next_chapter["idx"]
                     current_offset = 0
@@ -403,7 +599,9 @@ if not stopped_reason:
                         if new_summary:
                             current_summary = new_summary
                     else:
-                        chapter_pos = advance_chapter_pos(chapters, chapter_pos)
+                        chapter_pos = advance_chapter_pos(
+                            chapter_pos, readable_positions
+                        )
                         next_chapter = chapters[chapter_pos]
                         current_idx = next_chapter["idx"]
                         next_word_count = next_chapter.get("word_count", 0)

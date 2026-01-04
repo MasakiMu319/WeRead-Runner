@@ -60,25 +60,16 @@ book = [
     "9b13257072562b5c9b1c8d6",
 ]
 
-# 章节
-chapter = [
-    "ecc32f3013eccbc87e4b62e",
-    "a87322c014a87ff679a21ea",
-    "e4d32d5015e4da3b7fbb1fa",
-    "16732dc0161679091c5aeb1",
-    "8f132430178f14e45fce0f7",
-    "c9f326d018c9f0f895fb5e4",
-    "45c322601945c48cce2e120",
-    "d3d322001ad3d9446802347",
-    "65132ca01b6512bd43d90e3",
-    "c20321001cc20ad4d76f5ae",
-    "c51323901dc51ce410c121b",
-    "aab325601eaab3238922e53",
-    "9bf32f301f9bf31c7ff0a60",
-    "c7432af0210c74d97b01b1c",
-    "70e32fb021170efdf2eca12",
-    "6f4322302126f4922f45dec",
-]
+# 章节/书籍列表支持环境变量覆盖（逗号分隔）
+def _parse_env_list(value):
+    if not value:
+        return None
+    items = [v.strip() for v in value.split(",") if v.strip()]
+    return items or None
+
+_book_env = _parse_env_list(os.getenv("WXREAD_BOOK_LIST"))
+if _book_env:
+    book = _book_env
 
 """
 建议保留区域|默认读三体，其它书籍自行测试时间是否增加

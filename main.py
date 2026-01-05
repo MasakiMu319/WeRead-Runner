@@ -2,6 +2,7 @@
 import re
 import os
 import math
+from datetime import datetime, timedelta, timezone
 import json
 import time
 import random
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)-8s - %(message)s"
 )
+logging.info("ℹ️ PUSH_METHOD=%s", (PUSH_METHOD or "").strip() or "EMPTY")
 
 # 加密盐及其它默认值
 KEY = "3c5c8717f3daf09iop3423zafeqoi"
@@ -116,11 +118,32 @@ def safe_push(content, method):
     """安全推送：避免因推送配置错误导致主流程崩溃"""
     if method in (None, ""):
         logging.info("ℹ️ PUSH_METHOD 为空，跳过推送。")
-    return False
+        return False
+    method_norm = (
+        method.strip().strip('"').strip("'").lower() if isinstance(method, str) else method
+    )
+    if method_norm not in VALID_PUSH_METHODS:
+        logging.warning("⚠️ PUSH_METHOD 无效(%s)，跳过推送。", method)
+        return False
+    try:
+        logging.info("📨 准备推送: method=%s", method_norm)
+        push(content, method_norm)
+        logging.info("✅ 推送已触发: method=%s", method_norm)
+        return True
+    except Exception as exc:
+        logging.error("❌ 推送失败: %s", exc)
+        return False
 
 
 def get_start_delay_seconds():
     """根据环境变量获取启动延迟（秒）"""
+    tz = timezone(timedelta(hours=8))
+    now_cn = datetime.now(tz)
+    logging.info("🕒 当前北京时间：%s", now_cn.strftime("%Y-%m-%d %H:%M:%S"))
+    if now_cn.hour > 6 or (now_cn.hour == 6 and now_cn.minute >= 10):
+        logging.info("🟢 判定为手动触发，跳过启动延迟。")
+        return 0
+    logging.info("🟡 判定为定时触发，启用随机延迟。")
     min_raw = os.getenv("WXREAD_START_DELAY_MIN")
     max_raw = os.getenv("WXREAD_START_DELAY_MAX")
     if not min_raw and not max_raw:
@@ -142,16 +165,6 @@ def get_start_delay_seconds():
     if max_val == 0 and min_val == 0:
         return 0
     return random.randint(min_val, max_val)
-    method_norm = method.lower() if isinstance(method, str) else method
-    if method_norm not in VALID_PUSH_METHODS:
-        logging.warning("⚠️ PUSH_METHOD 无效(%s)，跳过推送。", method)
-        return False
-    try:
-        push(content, method_norm)
-        return True
-    except Exception as exc:
-        logging.error("❌ 推送失败: %s", exc)
-        return False
 
 
 def extract_balanced_json(text, start_index):

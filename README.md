@@ -1,4 +1,4 @@
-# wxread
+# WeRead-Runner
 
 在微信读书网页端模拟阅读请求的脚本，可用 GitHub Actions 定时运行，并可选把结果推送到 PushPlus / WxPusher / Telegram / Server酱。
 

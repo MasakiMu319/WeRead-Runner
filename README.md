@@ -1,104 +1,77 @@
-# 刷时间不加时长，是因为最近微信读书又缩紧限制了，需要更新或重新fork配置 ！！！
+# wxread
 
-## 项目介绍 📚
+在微信读书网页端模拟阅读请求的脚本，可用 GitHub Actions 定时运行，并可选把结果推送到 PushPlus / WxPusher / Telegram / Server酱。
 
-这个脚本主要是为了在微信读书的阅读**挑战赛中刷时长**和**保持天数**。由于本人偶尔看书时未能及时签到，导致入场费打了水漂。网上找了一些，发现高赞的自动阅读需要挂阅读器模拟或者用ADB模拟，实现一点也不优雅。因此，我决定编写一个自动化脚本。通过对官网接口的抓包和JS逆向分析实现。
+> 仅供学习交流使用，请自行评估风险与合规性。
 
-该脚本具备以下功能：
+## 功能
 
-- **阅读时长调节**：默认计入排行榜和挑战赛，时长可调节，默认为60分钟。
-- **定时运行推送**：可部署在GitHub Action/服务器上，支持每天定时运行并推送结果到微信。
-- **Cookie自动更新**：脚本能自动获取并更新Cookie，一次部署后面无需其它操作。
-- **轻量化设计**：本脚本实现了轻量化的编写，部署服务器/GIthub action后到点运行，无需额外硬件。
+- 模拟 `https://weread.qq.com/web/book/read` 阅读请求
+- 自动尝试续期 cookie（`wr_skey`）
+- 支持随机启动延迟、随机章节切换、阅读/休息节奏
+- 可选推送：`pushplus` / `wxpusher` / `telegram` / `serverchan`
 
-***
-## 操作步骤（v5.0） 🛠️
+## 使用前准备：抓包得到 `WXREAD_CURL_BASH`
 
-### 抓包准备
+1. 打开 https://weread.qq.com/ 并登录
+2. 任意打开一本书进入阅读页，翻到下一页
+3. 在开发者工具 Network 中找到请求：`https://weread.qq.com/web/book/read`
+4. 右键该请求：Copy → Copy as cURL（bash）
+5. 将整条 `curl ...` 命令保存为环境变量 `WXREAD_CURL_BASH`（务必放到 **GitHub Secrets**，不要提交到仓库）
 
-脚本逻辑还是比较简单的，`main.py`与`push.py`代码不需要改动。在微信阅读官网 [微信读书](https://weread.qq.com/) 搜索【三体】点开阅读点击下一页进行抓包，抓到`read`接口 `https://weread.qq.com/web/book/read`，如果返回格式正常（如：
+## GitHub Actions 部署（推荐）
 
-```json
-{
-  "succ": 1,
-  "synckey": 564589834
-}
+1. Fork 本仓库
+2. 仓库 Settings → Secrets and variables → Actions：
+   - **Repository secrets**
+     - `WXREAD_CURL_BASH`（必填）
+     - `PUSH_METHOD`（可选）：`pushplus` / `wxpusher` / `telegram` / `serverchan`
+     - `PUSHPLUS_TOKEN`（当 `PUSH_METHOD=pushplus`）
+     - `WXPUSHER_SPT`（当 `PUSH_METHOD=wxpusher`）
+     - `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`（当 `PUSH_METHOD=telegram`）
+     - `SERVERCHAN_SPT`（当 `PUSH_METHOD=serverchan`）
+     - `http_proxy`、`https_proxy`（可选，Telegram 代理）
+   - **Repository variables**
+     - `READ_NUM`（可选）
+     - `WXREAD_BOOK_LIST`（可选）
+3. 在 Actions 页面手动触发工作流，或等待定时任务
+
+定时规则在 `.github/workflows/deploy.yml` 里，默认是北京时间 06:00 触发（对应 `cron: '0 22 * * *'`，UTC 22:00）。
+
+## 配置项说明
+
+| 名称 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `WXREAD_CURL_BASH` | 是 | 无 | 抓包得到的 `curl`（bash）命令，脚本会从中提取 `headers` 和 `cookies` |
+| `READ_NUM` | 否 | `40` | 最小阅读次数下限（每次请求 `rt=30s`）；脚本实际会在 `max(READ_NUM, 360)` 到其 `1.5x` 之间随机取值 |
+| `WXREAD_BOOK_LIST` | 否 | `config.py` 内置 | 逗号分隔的书籍 id 列表；每次运行会随机选一本书作为入口（见下文“获取书籍 ID”） |
+| `WXREAD_START_DELAY_MIN` | 否 | 空/0 | 定时触发时的随机启动延迟下限（秒） |
+| `WXREAD_START_DELAY_MAX` | 否 | 空/0 | 定时触发时的随机启动延迟上限（秒） |
+| `PUSH_METHOD` | 否 | 空 | 推送方式：`pushplus` / `wxpusher` / `telegram` / `serverchan`；为空则不推送 |
+| `PUSHPLUS_TOKEN` | 否 | 空 | PushPlus token（`PUSH_METHOD=pushplus`） |
+| `WXPUSHER_SPT` | 否 | 空 | WxPusher SPT（`PUSH_METHOD=wxpusher`） |
+| `TELEGRAM_BOT_TOKEN` | 否 | 空 | Telegram bot token（`PUSH_METHOD=telegram`） |
+| `TELEGRAM_CHAT_ID` | 否 | 空 | Telegram chat id（`PUSH_METHOD=telegram`） |
+| `SERVERCHAN_SPT` | 否 | 空 | Server酱 SendKey（`PUSH_METHOD=serverchan`） |
+| `http_proxy` / `https_proxy` | 否 | 空 | Telegram 代理（可选） |
+
+> 说明：脚本会用北京时间判断“是否跳过启动延迟”。当北京时间 **06:10 之后**运行时，会直接跳过延迟（视为手动触发）。
+
+## 本地运行（uv）
+
+需要：Python `>=3.13`、`uv`。
+
+```bash
+uv sync --locked
+
+export WXREAD_CURL_BASH="(粘贴你抓到的整条 curl bash 命令)"
+export READ_NUM=360
+export WXREAD_BOOK_LIST='24a320007191987a24a4603'
+export PUSH_METHOD=''
+
+uv run python main.py
 ```
-右键复制为Bash格式。
 
-### 方法一： GitHub Action部署运行（GitHub运行）
+## 获取书籍 ID（用于 `WXREAD_BOOK_LIST`）
 
-
-- Fork这个仓库，在仓库 **Settings** -> 左侧列表中的 **Secrets and variables** -> **Actions**，然后在右侧的 **Repository secrets** 中添加如下值：
-  - `WXREAD_CURL_BASH`：上面抓read接口后转换为curl_bash的数据。
-  - `PUSH_METHOD`：推送方法，4选1推送方式（pushplus、wxpusher、telegram、serverChan）。
-  - `PUSHPLUS_TOKEN` or `WXPUSHER_SPT` or `TELEGRAM_BOT_TOKEN`&`TELEGRAM_CHAT_ID` or `SERVERCHAN_SPT`: 选择推送后填写对应token。
-  
-- 在 **Variables** 部分，最下方添加变量：
-  - `READ_NUM`：设定每次阅读的目标次数。
-
-
-- 基本释义：
-
-| key                        | Value                               | 说明                                                         | 属性      |
-| ------------------------- | ---------------------------------- | ------------------------------------------------------------ | --------- |
-| `WXREAD_CURL_BASH`         | `read` 接口 `curl_bash`数据 | **必填**，必须提供有效指令                                   | secrets   |
-| `READ_NUM`                 | 阅读次数（每次 30 秒）              | **可选**，阅读时长，默认 20 分钟                           | variables |
-| `PUSH_METHOD`              | `pushplus`/`wxpusher`/`telegram`/`serverchan`    | **可选**，推送方式，4选1，默认不推送                                       |    secrets     |
-| `PUSHPLUS_TOKEN`           | PushPlus 的 token                   | 当 `PUSH_METHOD=pushplus` 时必填，[获取地址](https://www.pushplus.plus/uc.html) | secrets   |
-| `WXPUSHER_SPT`             | WxPusher 的token                    | 当 `PUSH_METHOD=wxpusher` 时必填，[获取地址](https://wxpusher.zjiecode.com/docs/#/?id=获取spt) | secrets   |
-| `TELEGRAM_BOT_TOKEN`  <br>`TELEGRAM_CHAT_ID`   <br>`http_proxy`/`https_proxy`（可选）| 群组id以及机器人token                 | 当 `PUSH_METHOD=telegram` 时必填，[配置文档](https://www.nodeseek.com/post-22475-1) | secrets   |
-| `SERVERCHAN_SPT`          | serverchan 的 SendKey               | 当 `PUSH_METHOD=serverchan` 时必填，[获取地址](https://sct.ftqq.com/sendkey) | secrets   |
-
-**重要：除了READ_NUM配置在varables，其它的都配置在secrets里面的；需要推送`PUSH_METHOD`是必填的。**
-
-### 视频教程
-
-[![视频教程](https://github.com/user-attachments/assets/ec144869-3dbb-40fe-9bc5-f8bf1b5fce3c)](https://www.bilibili.com/video/BV1kJ6gY3En3/ "点击查看视频")
-
-
-### 方法二： 服务器运行（docker部署）
-
-- 在你的服务器上有Python运行环境即可，使用`cron`定义自动运行。
-- 或者通过docker运行，将抓到的bash命令在 [Convert](https://curlconverter.com/python/) 转化为Python字典格式，复制需要的headers与cookies即可（data不需要）。
-
-steps1：克隆这个项目：`git clone https://github.com/findmover/wxread.git`<br>
-steps2：配置config.py里的headers、cookies、READ_NUM、PUSH_METHOD以及对应推送方式token<br>
-steps3：进入目录使用镜像构建容器：
-`docker rm -f wxread && docker build -t wxread . && docker run -d --name wxread -v $(pwd)/logs:/app/logs --restart always wxread`<br>
-steps4：测试：`docker exec -it wxread python /app/main.py`
-
-***
-## Attention 📢
-
-1. **签到次数调整**：只需签到完成挑战赛可以将`num`次数从120调整为2，每次`num`为30秒，200即100分钟。
-   
-2. **解决阅读时间问题**：对于issue中提出的“阅读时间没有增加”，“增加时间与刷的时间不对等”建议保留`config.py`中的【data】字段，默认阅读三体，其它书籍自行测试。
-
-3. **GitHub Action部署/本地部署**：主要配置config.py即可，Action部署使用环境变量，本地部署修改config.py里的阅读次数、headers、cookies即可。
-
-4. **推送**：pushplus推送偶尔出问题，猜测是GitHub action环境问题，增加重试机制。并增加wxpusher的极简推送方式。
-
-
-***
-## 字段解释 🔍
-
-| 字段 | 示例值 | 解释 |
-| --- | --- | --- |
-| `appId` | `"wbxxxxxxxxxxxxxxxxxxxxxxxx"` | 应用的唯一标识符。 |
-| `b` | `"ce032b305a9bc1ce0b0dd2a"` | 书籍或章节的唯一标识符。 |
-| `c` | `"0723244023c072b030ba601"` | 内容的唯一标识符，可能是页面或具体段落。 |
-| `ci` | `60` | 章节或部分的索引。 |
-| `co` | `336` | 内容的具体位置或页码。 |
-| `sm` | `"[插图]威慑纪元61年，执剑人在一棵巨树"` | 当前阅读的内容描述或摘要。 |
-| `pr` | `65` | 页码或段落索引。 |
-| `rt` | `88` | 阅读时长或阅读进度。 |
-| `ts` | `1727580815581` | 时间戳，表示请求发送的具体时间（毫秒级）。 |
-| `rn` | `114` | 随机数或请求编号，用于标识唯一的请求。 |
-| `sg` | `"bfdf7de2fe1673546ca079e2f02b79b937901ef789ed5ae16e7b43fb9e22e724"` | 安全签名，用于验证请求的合法性和完整性。 |
-| `ct` | `1727580815` | 时间戳，表示请求发送的具体时间（秒级）。 |
-| `ps` | `"xxxxxxxxxxxxxxxxxxxxxxxx"` | 用户标识符或会话标识符，用于追踪用户或会话。 |
-| `pc` | `"xxxxxxxxxxxxxxxxxxxxxxxx"` | 设备标识符或客户端标识符，用于标识用户的设备或客户端。 |
-| `s` | `"fadcb9de"` | 校验和或哈希值，用于验证请求数据的完整性。 |
-
-
+在微信读书网页端打开阅读页，URL 形如：`https://weread.qq.com/web/reader/<bookId>`，取其中的 `<bookId>` 即可。

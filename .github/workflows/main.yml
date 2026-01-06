@@ -56,7 +56,7 @@ jobs:
         READ_NUM: ${{ vars.READ_NUM }}  # 使用 Repository Variables
         WXREAD_BOOK_LIST: ${{ vars.WXREAD_BOOK_LIST }}
         WXREAD_START_DELAY_MIN: 0
-        WXREAD_START_DELAY_MAX: 9000
+        WXREAD_START_DELAY_MAX: 1800
 
       run: |
         uv run main.py

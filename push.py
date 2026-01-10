@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import random
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -33,32 +33,44 @@ class PushNotification:
         self.serverchan_spt = serverchan_spt
         self.proxy = https_proxy or http_proxy
 
+    async def _retry_request(
+        self,
+        request_func: Callable[[], Awaitable[httpx.Response]],
+        service_name: str,
+        attempts: int = 5,
+    ) -> None:
+        """Execute a request with retry logic."""
+        for attempt in range(attempts):
+            try:
+                response = await request_func()
+                response.raise_for_status()
+                logger.info("✅ %s响应: %s", service_name, response.text)
+                return
+            except httpx.RequestError as exc:
+                logger.error("❌ %s推送失败: %s", service_name, exc)
+                if attempt < attempts - 1:
+                    sleep_time = random.randint(180, 360)
+                    logger.info("将在 %d 秒后重试...", sleep_time)
+                    await asyncio.sleep(sleep_time)
+
     async def push_pushplus(self, content: str) -> None:
         if not self.pushplus_token:
             raise ValueError("PushPlus token missing")
-        attempts = 5
         payload = {
             "token": self.pushplus_token,
             "title": "微信阅读推送...",
             "content": content,
         }
-        for attempt in range(attempts):
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.post(
-                        self.pushplus_url,
-                        content=json.dumps(payload).encode("utf-8"),
-                        headers=self.headers,
-                    )
-                    response.raise_for_status()
-                    logger.info("✅ PushPlus响应: %s", response.text)
-                    break
-            except httpx.RequestError as exc:
-                logger.error("❌ PushPlus推送失败: %s", exc)
-                if attempt < attempts - 1:
-                    sleep_time = random.randint(180, 360)
-                    logger.info("将在 %d 秒后重试...", sleep_time)
-                    await asyncio.sleep(sleep_time)
+
+        async def request() -> httpx.Response:
+            async with httpx.AsyncClient(timeout=10) as client:
+                return await client.post(
+                    self.pushplus_url,
+                    content=json.dumps(payload).encode("utf-8"),
+                    headers=self.headers,
+                )
+
+        await self._retry_request(request, "PushPlus")
 
     async def push_telegram(self, content: str) -> bool:
         if not self.telegram_bot_token or not self.telegram_chat_id:
@@ -85,60 +97,41 @@ class PushNotification:
     async def push_wxpusher(self, content: str) -> None:
         if not self.wxpusher_spt:
             raise ValueError("WxPusher spt missing")
-        attempts = 5
         url = self.wxpusher_simple_url.format(self.wxpusher_spt, content)
-        for attempt in range(attempts):
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.get(url)
-                    response.raise_for_status()
-                    logger.info("✅ WxPusher响应: %s", response.text)
-                    break
-            except httpx.RequestError as exc:
-                logger.error("❌ WxPusher推送失败: %s", exc)
-                if attempt < attempts - 1:
-                    sleep_time = random.randint(180, 360)
-                    logger.info("将在 %d 秒后重试...", sleep_time)
-                    await asyncio.sleep(sleep_time)
+
+        async def request() -> httpx.Response:
+            async with httpx.AsyncClient(timeout=10) as client:
+                return await client.get(url)
+
+        await self._retry_request(request, "WxPusher")
 
     async def push_serverchan(self, content: str) -> None:
         if not self.serverchan_spt:
             raise ValueError("ServerChan spt missing")
-        attempts = 5
         url = self.server_chan_url.format(self.serverchan_spt)
-
-        title = "微信阅读推送..."
-        if "自动阅读完成" not in content:
-            title = "微信阅读失败！！"
-
+        title = "微信阅读失败！！" if "自动阅读完成" not in content else "微信阅读推送..."
         payload = {"title": title, "desp": content}
-        for attempt in range(attempts):
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.post(
-                        url,
-                        content=json.dumps(payload).encode("utf-8"),
-                        headers=self.headers,
-                    )
-                    response.raise_for_status()
-                    logger.info("✅ ServerChan响应: %s", response.text)
-                    break
-            except httpx.RequestError as exc:
-                logger.error("❌ ServerChan推送失败: %s", exc)
-                if attempt < attempts - 1:
-                    sleep_time = random.randint(180, 360)
-                    logger.info("将在 %d 秒后重试...", sleep_time)
-                    await asyncio.sleep(sleep_time)
+
+        async def request() -> httpx.Response:
+            async with httpx.AsyncClient(timeout=10) as client:
+                return await client.post(
+                    url,
+                    content=json.dumps(payload).encode("utf-8"),
+                    headers=self.headers,
+                )
+
+        await self._retry_request(request, "ServerChan")
 
     async def push(self, content: str, method: str) -> Any:
-        if method == "pushplus":
-            return await self.push_pushplus(content)
-        if method == "telegram":
-            return await self.push_telegram(content)
-        if method == "wxpusher":
-            return await self.push_wxpusher(content)
-        if method == "serverchan":
-            return await self.push_serverchan(content)
+        handlers = {
+            "pushplus": self.push_pushplus,
+            "telegram": self.push_telegram,
+            "wxpusher": self.push_wxpusher,
+            "serverchan": self.push_serverchan,
+        }
+        handler = handlers.get(method)
+        if handler:
+            return await handler(content)
         raise ValueError(
             "❌ 无效的通知渠道，请选择 'pushplus'、'telegram'、'wxpusher' 或 'serverchan'"
         )

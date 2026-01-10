@@ -45,6 +45,16 @@ class ReadContext:
     current_summary: str
 
 
+def _parse_delay_value(raw: str | None) -> int:
+    """Parse a delay value string, returning 0 for invalid or negative values."""
+    if raw is None:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
 def get_start_delay_seconds(settings: Settings) -> int:
     tz = timezone(timedelta(hours=8))
     now_cn = datetime.now(tz)
@@ -54,39 +64,23 @@ def get_start_delay_seconds(settings: Settings) -> int:
         return 0
     logger.info("🟡 判定为定时触发，启用随机延迟。")
 
-    min_raw = settings.start_delay_min_raw
-    max_raw = settings.start_delay_max_raw
-    if not min_raw and not max_raw:
+    if not settings.start_delay_min_raw and not settings.start_delay_max_raw:
         return 0
 
-    try:
-        min_val = int(min_raw) if min_raw is not None else 0
-    except ValueError:
-        min_val = 0
-    try:
-        max_val = int(max_raw) if max_raw is not None else 0
-    except ValueError:
-        max_val = 0
-    if min_val < 0:
-        min_val = 0
-    if max_val < 0:
-        max_val = 0
+    min_val = _parse_delay_value(settings.start_delay_min_raw)
+    max_val = _parse_delay_value(settings.start_delay_max_raw)
     if max_val < min_val:
         min_val, max_val = max_val, min_val
-    if max_val == 0 and min_val == 0:
+    if max_val == 0:
         return 0
     return random.randint(min_val, max_val)
 
 
 async def safe_push(content: str, method: str | None, notifier: PushNotification) -> bool:
-    if method in (None, ""):
+    if not method:
         logger.info("ℹ️ PUSH_METHOD 为空，跳过推送。")
         return False
-    method_norm = (
-        method.strip().strip('"').strip("'").lower()
-        if isinstance(method, str)
-        else method
-    )
+    method_norm = method.strip().strip('"').strip("'").lower()
     if method_norm not in VALID_PUSH_METHODS:
         logger.warning("⚠️ PUSH_METHOD 无效(%s)，跳过推送。", method)
         return False
@@ -388,7 +382,7 @@ async def run(settings: Settings) -> None:
                             next_chapter = ctx.chapters[ctx.chapter_pos]
                             ctx.current_idx = next_chapter["idx"]
                             next_word_count = next_chapter.get("word_count", 0)
-                            if next_word_count and next_word_count > 0:
+                            if next_word_count > 0:
                                 ctx.current_offset = random.randint(
                                     10, min(80, max(10, next_word_count // 50))
                                 )

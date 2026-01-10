@@ -79,9 +79,9 @@ class WeReadClient:
                 url,
                 response.status_code,
                 len(html),
-                True if state_obj else False,
+                bool(state_obj),
                 len(readers),
-                book_id_candidates if book_id_candidates else None,
+                book_id_candidates or None,
             )
             return None
         return {"progress_book_id": str(progress_book_id)}

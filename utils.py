@@ -168,7 +168,7 @@ def calc_read_step(interval_sec: int, word_count: int) -> int:
     interval = max(1, int(interval_sec))
     speed = random.uniform(3.0, 6.0)
     step = max(50, int(interval * speed))
-    if word_count and word_count > 0:
+    if word_count > 0:
         max_step = max(200, int(word_count * 0.05))
         step = min(step, max_step)
     return step
@@ -184,13 +184,8 @@ def advance_chapter_pos(current_pos: int, readable_positions: list[int]) -> int:
 
 
 def build_readable_positions(chapters: list[dict[str, Any]]) -> list[int]:
-    readable: list[int] = []
-    for i, ch in enumerate(chapters):
-        if ch.get("word_count", 0) > 50:
-            readable.append(i)
-    if readable:
-        return readable
-    return [i for i, _ in enumerate(chapters)]
+    readable = [i for i, ch in enumerate(chapters) if ch.get("word_count", 0) > 50]
+    return readable if readable else list(range(len(chapters)))
 
 
 def pick_random_chapter(
@@ -199,7 +194,7 @@ def pick_random_chapter(
     pos = random.choice(readable_positions) if readable_positions else 0
     chapter = chapters[pos]
     word_count = chapter.get("word_count", 0)
-    if word_count and word_count > 0:
+    if word_count > 0:
         offset = random.randint(10, min(80, max(10, word_count // 50)))
     else:
         offset = 0

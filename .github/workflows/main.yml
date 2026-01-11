@@ -56,7 +56,9 @@ jobs:
         READ_NUM: ${{ vars.READ_NUM }}  # 使用 Repository Variables
         WXREAD_BOOK_LIST: ${{ vars.WXREAD_BOOK_LIST }}
         WXREAD_START_DELAY_MIN: 0
-        WXREAD_START_DELAY_MAX: 1800
+        WXREAD_START_DELAY_MAX: 900
+        WXREAD_MAX_RUNTIME_SECONDS: 20700  # 5h45m，避免触发 GitHub Actions 6h 上限
+        WXREAD_EXIT_GRACE_SECONDS: 120
 
       run: |
         uv run main.py

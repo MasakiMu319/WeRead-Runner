@@ -37,7 +37,7 @@ class PushNotification:
         self,
         request_func: Callable[[], Awaitable[httpx.Response]],
         service_name: str,
-        attempts: int = 5,
+        attempts: int = 3,
     ) -> None:
         """Execute a request with retry logic."""
         for attempt in range(attempts):
@@ -49,7 +49,7 @@ class PushNotification:
             except httpx.RequestError as exc:
                 logger.error("❌ %s推送失败: %s", service_name, exc)
                 if attempt < attempts - 1:
-                    sleep_time = random.randint(180, 360)
+                    sleep_time = random.randint(10, 30)
                     logger.info("将在 %d 秒后重试...", sleep_time)
                     await asyncio.sleep(sleep_time)
 
@@ -77,22 +77,24 @@ class PushNotification:
             raise ValueError("Telegram token/chat_id missing")
         url = self.telegram_url.format(self.telegram_bot_token)
         payload = {"chat_id": self.telegram_chat_id, "text": content}
-        try:
-            async with httpx.AsyncClient(timeout=30, proxy=self.proxy) as client:
+
+        async def try_send(use_proxy: bool) -> bool:
+            proxy = self.proxy if use_proxy else None
+            async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
                 response = await client.post(url, json=payload)
                 logger.info("✅ Telegram响应: %s", response.text)
                 response.raise_for_status()
                 return True
-        except Exception as exc:
-            logger.error("❌ Telegram代理发送失败: %s", exc)
+
+        # 先尝试使用代理，失败后尝试直连
+        for use_proxy in [True, False]:
             try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    response = await client.post(url, json=payload)
-                    response.raise_for_status()
-                    return True
+                return await try_send(use_proxy)
             except Exception as exc:
-                logger.error("❌ Telegram发送失败: %s", exc)
-                return False
+                label = "代理" if use_proxy else "直连"
+                logger.error("❌ Telegram %s发送失败: %s", label, exc)
+
+        return False
 
     async def push_wxpusher(self, content: str) -> None:
         if not self.wxpusher_spt:

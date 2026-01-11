@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -45,14 +46,162 @@ class ReadContext:
     current_summary: str
 
 
-def _parse_delay_value(raw: str | None) -> int:
-    """Parse a delay value string, returning 0 for invalid or negative values."""
+@dataclass(frozen=True)
+class TimeBudget:
+    deadline_mono: float
+    max_runtime_seconds: int
+    grace_seconds: int
+
+    def seconds_left(self) -> float:
+        return self.deadline_mono - time.monotonic()
+
+    def max_sleep_seconds(self) -> float:
+        return max(0.0, self.seconds_left() - float(self.grace_seconds))
+
+    def should_exit(self) -> bool:
+        return self.seconds_left() <= float(self.grace_seconds)
+
+
+def _parse_int(raw: str | None, default: int, *, min_value: int = 0) -> int:
+    """Parse an integer from string, returning default for invalid values.
+
+    Args:
+        raw: The string to parse
+        default: Default value if parsing fails or value is below min_value
+        min_value: Minimum acceptable value (default 0)
+    """
     if raw is None:
-        return 0
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
     try:
-        return max(0, int(raw))
+        value = int(raw)
     except ValueError:
+        return default
+    return value if value >= min_value else default
+
+
+def get_time_budget() -> TimeBudget | None:
+    if os.getenv("GITHUB_ACTIONS", "").strip().lower() != "true":
+        return None
+    default_max_runtime_seconds = 5 * 60 * 60 + 45 * 60  # 5h45m，给 6h 上限留余量
+    max_runtime_seconds = _parse_int(
+        os.getenv("WXREAD_MAX_RUNTIME_SECONDS"), default_max_runtime_seconds, min_value=1
+    )
+    grace_seconds = _parse_int(os.getenv("WXREAD_EXIT_GRACE_SECONDS"), 120, min_value=1)
+    return TimeBudget(
+        deadline_mono=time.monotonic() + float(max_runtime_seconds),
+        max_runtime_seconds=max_runtime_seconds,
+        grace_seconds=grace_seconds,
+    )
+
+
+def estimate_max_reads_by_time_budget(settings: Settings, time_budget: TimeBudget) -> int:
+    if settings.read_min_per_success <= 0:
         return 0
+    available = time_budget.max_sleep_seconds()
+    if available <= 0:
+        return 0
+
+    session_reads_min = max(
+        1, math.ceil(settings.session_minutes_min / settings.read_min_per_success)
+    )
+    rest_overhead_per_read = float(settings.rest_minutes_max * 60) / float(session_reads_min)
+    per_read_seconds = float(settings.sleep_max_seconds) + 2.0 + rest_overhead_per_read
+    if per_read_seconds <= 0:
+        return 0
+
+    return max(1, int(available // per_read_seconds))
+
+
+async def safe_push(
+    content: str,
+    method: str | None,
+    notifier: PushNotification,
+    *,
+    time_budget: TimeBudget | None = None,
+    final: bool = False,
+) -> bool:
+    if not method:
+        logger.info("ℹ️ PUSH_METHOD 为空，跳过推送。")
+        return False
+    method_norm = method.strip().strip('"').strip("'").lower()
+    if method_norm not in VALID_PUSH_METHODS:
+        logger.warning("⚠️ PUSH_METHOD 无效(%s)，跳过推送。", method)
+        return False
+
+    timeout_seconds = 120.0
+    if time_budget is not None:
+        left = time_budget.seconds_left()
+        if left <= 0:
+            logger.warning("⏳ 剩余时间不足，跳过推送。")
+            return False
+        if final:
+            timeout_seconds = min(120.0, max(1.0, left - 1.0))
+        else:
+            non_final_budget = time_budget.max_sleep_seconds()
+            if non_final_budget <= 0:
+                logger.info("⏳ 进入收尾窗口，跳过非关键推送。")
+                return False
+            timeout_seconds = min(120.0, max(1.0, non_final_budget))
+
+    try:
+        logger.info(
+            "📨 准备推送: method=%s timeout=%ss final=%s",
+            method_norm,
+            int(timeout_seconds),
+            final,
+        )
+        await asyncio.wait_for(
+            notifier.push(content, method_norm), timeout=timeout_seconds
+        )
+        logger.info("✅ 推送已触发: method=%s", method_norm)
+        return True
+    except asyncio.TimeoutError:
+        logger.error("❌ 推送超时: method=%s", method_norm)
+        return False
+    except Exception as exc:
+        logger.error("❌ 推送失败: %s", exc)
+        return False
+
+
+async def push_early_exit(
+    reason: str,
+    total_minutes: float,
+    settings: Settings,
+    notifier: PushNotification,
+    time_budget: TimeBudget | None,
+) -> None:
+    """Push notification for early exit due to time budget."""
+    logger.warning("⏳ %s", reason)
+    await safe_push(
+        "🎉 微信读书自动阅读完成（提前结束）\n"
+        f"原因：{reason}\n"
+        f"⏱️ 阅读时长：{format_minutes(total_minutes)} 分钟。",
+        settings.push_method,
+        notifier,
+        time_budget=time_budget,
+        final=True,
+    )
+
+
+async def sleep_with_budget(
+    seconds: float, *, time_budget: TimeBudget | None
+) -> tuple[bool, float]:
+    if seconds <= 0:
+        return True, 0.0
+    if time_budget is None:
+        await asyncio.sleep(seconds)
+        return True, seconds
+
+    allowed = time_budget.max_sleep_seconds()
+    if allowed <= 0:
+        return False, 0.0
+
+    sleep_seconds = min(float(seconds), allowed)
+    await asyncio.sleep(sleep_seconds)
+    return sleep_seconds >= float(seconds), sleep_seconds
 
 
 def get_start_delay_seconds(settings: Settings) -> int:
@@ -67,31 +216,13 @@ def get_start_delay_seconds(settings: Settings) -> int:
     if not settings.start_delay_min_raw and not settings.start_delay_max_raw:
         return 0
 
-    min_val = _parse_delay_value(settings.start_delay_min_raw)
-    max_val = _parse_delay_value(settings.start_delay_max_raw)
+    min_val = _parse_int(settings.start_delay_min_raw, 0)
+    max_val = _parse_int(settings.start_delay_max_raw, 0)
     if max_val < min_val:
         min_val, max_val = max_val, min_val
     if max_val == 0:
         return 0
     return random.randint(min_val, max_val)
-
-
-async def safe_push(content: str, method: str | None, notifier: PushNotification) -> bool:
-    if not method:
-        logger.info("ℹ️ PUSH_METHOD 为空，跳过推送。")
-        return False
-    method_norm = method.strip().strip('"').strip("'").lower()
-    if method_norm not in VALID_PUSH_METHODS:
-        logger.warning("⚠️ PUSH_METHOD 无效(%s)，跳过推送。", method)
-        return False
-    try:
-        logger.info("📨 准备推送: method=%s", method_norm)
-        await notifier.push(content, method_norm)
-        logger.info("✅ 推送已触发: method=%s", method_norm)
-        return True
-    except Exception as exc:
-        logger.error("❌ 推送失败: %s", exc)
-        return False
 
 
 async def refresh_cookie(client: WeReadClient) -> bool:
@@ -215,16 +346,39 @@ async def run(settings: Settings) -> None:
         https_proxy=settings.https_proxy,
     )
 
+    time_budget = get_time_budget()
+    if time_budget is not None:
+        logger.info(
+            "⏳ GitHub Actions 时间预算已启用：max_runtime=%ss grace=%ss",
+            time_budget.max_runtime_seconds,
+            time_budget.grace_seconds,
+        )
+
+    finished_reason = None
     start_delay_seconds = get_start_delay_seconds(settings)
     if start_delay_seconds > 0:
+        if time_budget is not None:
+            allowed = time_budget.max_sleep_seconds()
+            if allowed <= 0:
+                finished_reason = "接近 GitHub Actions 6 小时上限，跳过启动延迟并提前结束。"
+            elif float(start_delay_seconds) > allowed:
+                logger.info("⏳ 启动延迟被裁剪：%ss -> %ss", start_delay_seconds, int(allowed))
+                start_delay_seconds = int(allowed)
         logger.info("⏳ 延迟启动：%s 秒", start_delay_seconds)
         await safe_push(
             "⏳ 任务延迟启动\n"
             f"预计延迟：{start_delay_seconds // 60}分{start_delay_seconds % 60}秒",
             settings.push_method,
             notifier,
+            time_budget=time_budget,
         )
-        await asyncio.sleep(start_delay_seconds)
+        slept_ok, _ = await sleep_with_budget(start_delay_seconds, time_budget=time_budget)
+        if not slept_ok and time_budget is not None:
+            finished_reason = "接近 GitHub Actions 6 小时上限，启动延迟未完成，提前结束。"
+
+    if finished_reason and time_budget is not None and time_budget.should_exit():
+        await push_early_exit(finished_reason, 0, settings, notifier, time_budget)
+        return
 
     async with WeReadClient(settings) as client:
         await refresh_cookie(client)
@@ -235,8 +389,27 @@ async def run(settings: Settings) -> None:
         stopped_reason = None
         min_reads = max(settings.read_num, math.ceil(180 / settings.read_min_per_success))
         max_reads = int(min_reads * 1.5)
-        target_reads = random.randint(min_reads, max_reads)
+        target_reads_original = random.randint(min_reads, max_reads)
+        target_reads = target_reads_original
+        target_reads_note = None
+        if time_budget is not None:
+            max_reads_by_budget = estimate_max_reads_by_time_budget(settings, time_budget)
+            if max_reads_by_budget <= 0:
+                finished_reason = "接近 GitHub Actions 6 小时上限，剩余时间不足以继续阅读，提前结束。"
+            elif target_reads > max_reads_by_budget:
+                logger.info(
+                    "⏳ 目标阅读次数被时间预算裁剪：%s -> %s",
+                    target_reads,
+                    max_reads_by_budget,
+                )
+                target_reads = max_reads_by_budget
+                target_reads_note = f"⏳ 时间预算裁剪：{target_reads_original} -> {target_reads}"
+
         target_minutes = target_reads * settings.read_min_per_success
+
+        if finished_reason and time_budget is not None and time_budget.should_exit():
+            await push_early_exit(finished_reason, 0, settings, notifier, time_budget)
+            return
 
         read_book_id = random.choice(settings.book_ids) if settings.book_ids else data.get(
             "b"
@@ -293,7 +466,14 @@ async def run(settings: Settings) -> None:
             ]
             if book_line:
                 start_lines.insert(1, book_line)
-            await safe_push("\n".join(start_lines), settings.push_method, notifier)
+            if target_reads_note:
+                start_lines.append(target_reads_note)
+            await safe_push(
+                "\n".join(start_lines),
+                settings.push_method,
+                notifier,
+                time_budget=time_budget,
+            )
 
         if not ctx or stopped_reason:
             total_minutes = success_count * settings.read_min_per_success
@@ -305,10 +485,15 @@ async def run(settings: Settings) -> None:
                     f"⏱️ 已完成：{format_minutes(total_minutes)} 分钟",
                     settings.push_method,
                     notifier,
+                    time_budget=time_budget,
+                    final=True,
                 )
             return
 
         while index <= target_reads:
+            if time_budget is not None and time_budget.should_exit():
+                finished_reason = "接近 GitHub Actions 6 小时上限，为避免 job 超时失败，提前结束。"
+                break
             ctx.data.pop("s", None)
             current_chapter = ctx.chapters[ctx.chapter_pos]
             ctx.current_idx = current_chapter["idx"]
@@ -407,8 +592,16 @@ async def run(settings: Settings) -> None:
                             f"预计休息：{rest_minutes} 分钟",
                             settings.push_method,
                             notifier,
+                            time_budget=time_budget,
                         )
-                        await asyncio.sleep(rest_minutes * 60)
+                        slept_ok, _ = await sleep_with_budget(
+                            rest_minutes * 60, time_budget=time_budget
+                        )
+                        if not slept_ok and time_budget is not None:
+                            finished_reason = (
+                                "接近 GitHub Actions 6 小时上限，休息被中断，提前结束。"
+                            )
+                            break
                         session_minutes = 0.0
                         session_target_minutes = random.randint(
                             settings.session_minutes_min, settings.session_minutes_max
@@ -418,11 +611,20 @@ async def run(settings: Settings) -> None:
                             f"下一轮目标：{session_target_minutes} 分钟",
                             settings.push_method,
                             notifier,
+                            time_budget=time_budget,
                         )
 
-                    await asyncio.sleep(
-                        random.randint(settings.sleep_min_seconds, settings.sleep_max_seconds)
+                    sleep_seconds = random.randint(
+                        settings.sleep_min_seconds, settings.sleep_max_seconds
                     )
+                    slept_ok, _ = await sleep_with_budget(
+                        sleep_seconds, time_budget=time_budget
+                    )
+                    if not slept_ok and time_budget is not None:
+                        finished_reason = (
+                            "接近 GitHub Actions 6 小时上限，为避免 job 超时失败，提前结束。"
+                        )
+                        break
                     done_minutes = success_count * settings.read_min_per_success
                     now_mono = time.monotonic()
                     if last_report_mono is None:
@@ -451,6 +653,7 @@ async def run(settings: Settings) -> None:
                             f"⏱️ 距上次上报：{gap_text}",
                             settings.push_method,
                             notifier,
+                            time_budget=time_budget,
                         )
                         last_progress_push_ts = now_ts
                 else:
@@ -476,7 +679,12 @@ async def run(settings: Settings) -> None:
                 f"⏱️ 已完成：{format_minutes(total_minutes)} 分钟",
                 settings.push_method,
                 notifier,
+                time_budget=time_budget,
+                final=True,
             )
+        elif finished_reason:
+            logger.info("🎉 阅读脚本已完成（提前结束）: %s", finished_reason)
+            await push_early_exit(finished_reason, total_minutes, settings, notifier, time_budget)
         else:
             logger.info("🎉 阅读脚本已完成！")
             await safe_push(
@@ -484,4 +692,6 @@ async def run(settings: Settings) -> None:
                 f"⏱️ 阅读时长：{format_minutes(total_minutes)} 分钟。",
                 settings.push_method,
                 notifier,
+                time_budget=time_budget,
+                final=True,
             )

@@ -142,11 +142,11 @@ def load_settings() -> Settings:
     read_min_per_success = 0.5
     rt_seconds = 30
     sleep_min_seconds = rt_seconds + 1
-    sleep_max_seconds = rt_seconds + 15
+    sleep_max_seconds = rt_seconds + 10
     session_minutes_min = 20
     session_minutes_max = 40
     rest_minutes_min = 3
-    rest_minutes_max = 8
+    rest_minutes_max = 6
     progress_interval_min = 10
     progress_interval_reads = int(progress_interval_min / read_min_per_success)
 

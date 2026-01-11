@@ -1,70 +1,72 @@
 # WeRead-Runner
 
-在微信读书网页端模拟阅读请求的脚本，可用 GitHub Actions 定时运行，并可选把结果推送到 PushPlus / WxPusher / Telegram / Server酱。
+A script that simulates reading requests on WeRead web platform. Can be scheduled with GitHub Actions and optionally push notifications via PushPlus / WxPusher / Telegram / ServerChan.
 
-> 仅供学习交流使用，请自行评估风险与合规性。
+> For educational purposes only. Please evaluate risks and compliance on your own.
 
-## 功能
+## Features
 
-- 模拟 `https://weread.qq.com/web/book/read` 阅读请求
-- 自动尝试续期 cookie（`wr_skey`）
-- 支持随机启动延迟、随机章节切换、阅读/休息节奏
-- 可选推送：`pushplus` / `wxpusher` / `telegram` / `serverchan`
+- Simulates `https://weread.qq.com/web/book/read` reading requests
+- Automatically attempts to renew cookie (`wr_skey`)
+- Supports random startup delay, random chapter switching, reading/rest rhythm
+- Optional push notifications: `pushplus` / `wxpusher` / `telegram` / `serverchan`
 
-## 使用前准备：抓包得到 `WXREAD_CURL_BASH`
+## Prerequisites: Capture `WXREAD_CURL_BASH`
 
-1. 打开 https://weread.qq.com/ 并登录
-2. 任意打开一本书进入阅读页，翻到下一页
-3. 在开发者工具 Network 中找到请求：`https://weread.qq.com/web/book/read`
-4. 右键该请求：Copy → Copy as cURL（bash）
-5. 将整条 `curl ...` 命令保存为环境变量 `WXREAD_CURL_BASH`（务必放到 **GitHub Secrets**，不要提交到仓库）
+1. Open https://weread.qq.com/ and log in
+2. Open any book to enter reading page, flip to next page
+3. In Developer Tools Network tab, find request: `https://weread.qq.com/web/book/read`
+4. Right-click the request: Copy → Copy as cURL (bash)
+5. Save the entire `curl ...` command as environment variable `WXREAD_CURL_BASH` (must be stored in **GitHub Secrets**, do not commit to repository)
 
-## GitHub Actions 部署（推荐）
+## GitHub Actions Deployment (Recommended)
 
-1. Fork 本仓库
-2. 仓库 Settings → Secrets and variables → Actions：
+1. Fork this repository
+2. Repository Settings → Secrets and variables → Actions:
    - **Repository secrets**
-     - `WXREAD_CURL_BASH`（必填）
-     - `PUSH_METHOD`（可选）：`pushplus` / `wxpusher` / `telegram` / `serverchan`
-     - `PUSHPLUS_TOKEN`（当 `PUSH_METHOD=pushplus`）
-     - `WXPUSHER_SPT`（当 `PUSH_METHOD=wxpusher`）
-     - `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`（当 `PUSH_METHOD=telegram`）
-     - `SERVERCHAN_SPT`（当 `PUSH_METHOD=serverchan`）
-     - `http_proxy`、`https_proxy`（可选，Telegram 代理）
+     - `WXREAD_CURL_BASH` (required)
+     - `PUSH_METHOD` (optional): `pushplus` / `wxpusher` / `telegram` / `serverchan`
+     - `PUSHPLUS_TOKEN` (when `PUSH_METHOD=pushplus`)
+     - `WXPUSHER_SPT` (when `PUSH_METHOD=wxpusher`)
+     - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (when `PUSH_METHOD=telegram`)
+     - `SERVERCHAN_SPT` (when `PUSH_METHOD=serverchan`)
+     - `http_proxy`, `https_proxy` (optional, for Telegram proxy)
    - **Repository variables**
-     - `READ_NUM`（可选）
-     - `WXREAD_BOOK_LIST`（可选）
-3. 在 Actions 页面手动触发工作流，或等待定时任务
+     - `READ_NUM` (optional)
+     - `WXREAD_BOOK_LIST` (optional)
+3. Manually trigger the workflow on Actions page, or wait for scheduled task
 
-定时规则在 `.github/workflows/deploy.yml` 里，默认是北京时间 06:00 触发（对应 `cron: '0 22 * * *'`，UTC 22:00）。
+The schedule is defined in `.github/workflows/main.yml`, defaults to 06:00 Beijing Time (corresponds to `cron: '0 22 * * *'`, UTC 22:00).
 
-## 配置项说明
+## Configuration Options
 
-| 名称 | 必填 | 默认值 | 说明 |
+| Name | Required | Default | Description |
 | --- | --- | --- | --- |
-| `WXREAD_CURL_BASH` | 是 | 无 | 抓包得到的 `curl`（bash）命令，脚本会从中提取 `headers` 和 `cookies` |
-| `READ_NUM` | 否 | `40` | 最小阅读次数下限（每次请求 `rt=30s`）；脚本实际会在 `max(READ_NUM, 360)` 到其 `1.5x` 之间随机取值 |
-| `WXREAD_BOOK_LIST` | 否 | `config.py` 内置 | 逗号分隔的书籍 id 列表；每次运行会随机选一本书作为入口（见下文“获取书籍 ID”） |
-| `WXREAD_START_DELAY_MIN` | 否 | 空/0 | 定时触发时的随机启动延迟下限（秒） |
-| `WXREAD_START_DELAY_MAX` | 否 | 空/0 | 定时触发时的随机启动延迟上限（秒） |
-| `PUSH_METHOD` | 否 | 空 | 推送方式：`pushplus` / `wxpusher` / `telegram` / `serverchan`；为空则不推送 |
-| `PUSHPLUS_TOKEN` | 否 | 空 | PushPlus token（`PUSH_METHOD=pushplus`） |
-| `WXPUSHER_SPT` | 否 | 空 | WxPusher SPT（`PUSH_METHOD=wxpusher`） |
-| `TELEGRAM_BOT_TOKEN` | 否 | 空 | Telegram bot token（`PUSH_METHOD=telegram`） |
-| `TELEGRAM_CHAT_ID` | 否 | 空 | Telegram chat id（`PUSH_METHOD=telegram`） |
-| `SERVERCHAN_SPT` | 否 | 空 | Server酱 SendKey（`PUSH_METHOD=serverchan`） |
-| `http_proxy` / `https_proxy` | 否 | 空 | Telegram 代理（可选） |
+| `WXREAD_CURL_BASH` | Yes | None | Captured `curl` (bash) command, script will extract `headers` and `cookies` from it |
+| `READ_NUM` | No | `40` | Minimum read count lower bound (each request `rt=30s`); script will randomly pick a value between `max(READ_NUM, 360)` and its `1.5x` |
+| `WXREAD_BOOK_LIST` | No | Built-in `config.py` | Comma-separated book ID list; each run randomly selects one book as entry point (see "Get Book ID" below) |
+| `WXREAD_START_DELAY_MIN` | No | Empty/0 | Random startup delay lower bound in seconds for scheduled triggers |
+| `WXREAD_START_DELAY_MAX` | No | Empty/0 | Random startup delay upper bound in seconds for scheduled triggers |
+| `WXREAD_MAX_RUNTIME_SECONDS` | No | `20700` | Runtime budget in seconds. Enabled by default in GitHub Actions (`GITHUB_ACTIONS=true`) to avoid hitting 6h limit; will "finish normally" with explanation when budget is reached |
+| `WXREAD_EXIT_GRACE_SECONDS` | No | `120` | Buffer time in seconds for early exit when approaching budget, used for push/cleanup; avoids forced timeout failure by GitHub |
+| `PUSH_METHOD` | No | Empty | Push method: `pushplus` / `wxpusher` / `telegram` / `serverchan`; no push if empty |
+| `PUSHPLUS_TOKEN` | No | Empty | PushPlus token (when `PUSH_METHOD=pushplus`) |
+| `WXPUSHER_SPT` | No | Empty | WxPusher SPT (when `PUSH_METHOD=wxpusher`) |
+| `TELEGRAM_BOT_TOKEN` | No | Empty | Telegram bot token (when `PUSH_METHOD=telegram`) |
+| `TELEGRAM_CHAT_ID` | No | Empty | Telegram chat ID (when `PUSH_METHOD=telegram`) |
+| `SERVERCHAN_SPT` | No | Empty | ServerChan SendKey (when `PUSH_METHOD=serverchan`) |
+| `http_proxy` / `https_proxy` | No | Empty | Telegram proxy (optional) |
 
-> 说明：脚本会用北京时间判断“是否跳过启动延迟”。当北京时间 **06:10 之后**运行时，会直接跳过延迟（视为手动触发）。
+> Note: The script uses Beijing Time to determine "whether to skip startup delay". When running **after 06:10 Beijing Time**, it will skip the delay directly (treated as manual trigger).
 
-## 本地运行（uv）
+## Local Run (uv)
 
-需要：Python `>=3.13`、`uv`。
+Requirements: Python `>=3.13`, `uv`.
 
 ```bash
 uv sync --locked
 
-export WXREAD_CURL_BASH="(粘贴你抓到的整条 curl bash 命令)"
+export WXREAD_CURL_BASH="(paste your captured curl bash command)"
 export READ_NUM=360
 export WXREAD_BOOK_LIST='24a320007191987a24a4603'
 export PUSH_METHOD=''
@@ -72,6 +74,6 @@ export PUSH_METHOD=''
 uv run python main.py
 ```
 
-## 获取书籍 ID（用于 `WXREAD_BOOK_LIST`）
+## Get Book ID (for `WXREAD_BOOK_LIST`)
 
-在微信读书网页端打开阅读页，URL 形如：`https://weread.qq.com/web/reader/<bookId>`，取其中的 `<bookId>` 即可。
+Open reading page on WeRead web platform, URL format: `https://weread.qq.com/web/reader/<bookId>`, extract the `<bookId>` part.

@@ -233,7 +233,10 @@ async def refresh_cookie(client: WeReadClient) -> bool:
         logger.info("✅ 密钥刷新成功，新密钥：%s", new_skey)
         logger.info("🔄 重新本次阅读。")
         return True
-    logger.error("❌ 无法获取新密钥或者WXREAD_CURL_BASH配置有误，继续尝试。")
+    logger.error(
+        "❌ 无法获取新密钥。可能原因：WXREAD_CURL_BASH 未配置，或其中的 wr_rt/wr_vid 已过期。"
+    )
+    logger.error("💡 请重新登录微信读书网页版，从 Chrome DevTools 复制新的 curl bash 并更新环境变量。")
     logger.warning("⚠️ 刷新失败，继续使用旧 cookie 尝试。")
     return False
 

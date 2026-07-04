@@ -105,7 +105,12 @@ class WeReadClient:
         if safe_info:
             logger.info("🔁 进度响应: %s", safe_info)
         if "book" not in res_data:
-            logger.error("❌ 获取阅读进度缺少 book 字段。")
+            if res_data.get("errCode") == -2010:
+                logger.error(
+                    "❌ 获取阅读进度失败：用户不存在，cookie 已过期（请更新 WXREAD_CURL_BASH）。"
+                )
+            else:
+                logger.error("❌ 获取阅读进度缺少 book 字段。")
             return None
         return res_data
 
@@ -132,7 +137,12 @@ class WeReadClient:
             return None
         items = res_data.get("data") or []
         if not items:
-            logger.error("❌ 章节信息为空。")
+            if res_data.get("errCode") == -2010:
+                logger.error(
+                    "❌ 获取章节信息失败：用户不存在，cookie 已过期（请更新 WXREAD_CURL_BASH）。"
+                )
+            else:
+                logger.error("❌ 章节信息为空。")
             return None
         target = next(
             (item for item in items if str(item.get("bookId")) == str(book_id)), items[0]
@@ -190,6 +200,10 @@ class WeReadClient:
             safe_info = {k: resp_json.get(k) for k in safe_keys if k in resp_json}
             if safe_info:
                 logger.info("🔁 续期JSON: %s", safe_info)
+            if not wr_skey and resp_json.get("errCode") == -2013:
+                logger.error(
+                    "❌ 续期失败：params error，可能是 wr_rt/wr_vid 已过期（请更新 WXREAD_CURL_BASH）。"
+                )
         return wr_skey if wr_skey else None
 
     async def fix_no_synckey(self, book_id: str) -> None:
